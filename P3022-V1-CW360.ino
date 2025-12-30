@@ -162,28 +162,39 @@ struct EncState {
 EncState enc;
 
 static uint8_t  prevAB     = 0;
+static uint8_t  lastAB     = 0;
+static uint8_t  abCount    = 0;
 static bool     swPrevUp   = true;   // pullup: true=up
+static bool     swLastUp   = true;
+static uint32_t swLastChangeMs = 0;
 static uint32_t swDownMs   = 0;
 static bool     longFired  = false;
 
 void encoderTick1ms() {
+  const uint16_t swDebounceMs = 25;
+  const uint8_t abStableTicks = 2;
   // A/B decode (quadrature)
   uint8_t a = digitalRead(PIN_ENC_A);
   uint8_t b = digitalRead(PIN_ENC_B);
   uint8_t ab = (a << 1) | b;
 
-  uint8_t p = prevAB;
-  if (ab != p) {
-    // one direction: 00->01->11->10->00
-    if ((p == 0b00 && ab == 0b01) || (p == 0b01 && ab == 0b11) ||
-        (p == 0b11 && ab == 0b10) || (p == 0b10 && ab == 0b00)) {
-      enc.delta++;
-    }
-    // other direction: 00->10->11->01->00
-    else if ((p == 0b00 && ab == 0b10) || (p == 0b10 && ab == 0b11) ||
-             (p == 0b11 && ab == 0b01) || (p == 0b01 && ab == 0b00)) {
-      enc.delta--;
-    }
+  if (ab == lastAB) {
+    if (abCount < abStableTicks) abCount++;
+  } else {
+    abCount = 0;
+    lastAB = ab;
+  }
+
+  if (abCount >= abStableTicks && ab != prevAB) {
+    static const int8_t abTable[16] = {
+      0,  1, -1,  0,
+     -1,  0,  0,  1,
+      1,  0,  0, -1,
+      0, -1,  1,  0
+    };
+    uint8_t idx = (prevAB << 2) | ab;
+    int8_t step = abTable[idx];
+    if (step != 0) enc.delta += step;
     prevAB = ab;
   }
 
@@ -191,19 +202,24 @@ void encoderTick1ms() {
   bool up = digitalRead(PIN_ENC_SW); // true=up, false=pressed
   uint32_t now = millis();
 
-  if (swPrevUp && !up) { // pressed
-    swDownMs = now;
-    longFired = false;
+  if (up != swLastUp) {
+    swLastUp = up;
+    swLastChangeMs = now;
   }
-  if (!swPrevUp && up) { // released
-    if (!longFired) enc.click = true;
+
+  if ((uint32_t)(now - swLastChangeMs) >= swDebounceMs && up != swPrevUp) {
+    swPrevUp = up;
+    if (!swPrevUp) { // pressed
+      swDownMs = now;
+      longFired = false;
+    } else { // released
+      if (!longFired) enc.click = true;
+    }
   }
-  if (!up && !longFired && (uint32_t)(now - swDownMs) > 600) {
+  if (!swPrevUp && !longFired && (uint32_t)(now - swDownMs) > 600) {
     enc.longClick = true;
     longFired = true;
   }
-
-  swPrevUp = up;
 }
 
 // ---------------- LCD minimal redraw ----------------
@@ -408,7 +424,11 @@ void setup() {
 
   // init prevAB to current state to avoid first jump
   prevAB = ((digitalRead(PIN_ENC_A) & 1) << 1) | (digitalRead(PIN_ENC_B) & 1);
+  lastAB = prevAB;
+  abCount = 0;
   swPrevUp = digitalRead(PIN_ENC_SW);
+  swLastUp = swPrevUp;
+  swLastChangeMs = millis();
 }
 
 void loop() {
