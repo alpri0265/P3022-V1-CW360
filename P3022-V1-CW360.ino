@@ -27,8 +27,6 @@
   Note:
   - LCD I2C address commonly 0x27 or 0x3F. Change below if needed.
 */
-// test save
-
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
