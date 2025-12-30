@@ -1,3 +1,4 @@
+// test 1
 
 /*
   ATmega328 + LCD1602 I2C(PCF8574) + EC-11 (A/B + SW, RC-friendly polling) + P3022-V1-CW360 (VCC/OUT/GND analog)
