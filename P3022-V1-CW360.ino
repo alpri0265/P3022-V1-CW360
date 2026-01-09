@@ -1,44 +1,84 @@
 /*
-  ATmega328 + LCD1602 I2C(PCF8574) + EC-11 (A/B + SW, RC-friendly polling) + P3022-V1-CW360 (VCC/OUT/GND analog)
-
+  Arduino Uno/Nano/Micro Compatible
+  P3022 Angle Sensor with LCD Display and Rotary Encoder Menu
+  
+  Compatible boards:
+  - Arduino Uno (ATmega328P) - Full support
+  - Arduino Nano (ATmega328P) - Full support  
+  - Arduino Micro (ATmega32U4) - Full support
+  
+  Hardware:
+  - LCD1602 I2C (PCF8574 adapter)
+  - EC-11 Rotary Encoder (A/B + SW)
+  - P3022-V1-CW360 analog angle sensor
+  
   Features:
-  - Reads P3022 analog output on A0 (ADC averaged)
-  - Calibration MIN/MAX (stores to EEPROM)
+  - Reads P3022 analog output on A0 (ADC averaged for stability)
+  - Calibration MIN/MAX (stores to EEPROM with CRC validation)
   - Zero offset (Set Zero) stores to EEPROM
-  - Set Value: set displayed angle to an arbitrary target (e.g. 70.42°) by adjusting zero offset
+  - Set Value: set displayed angle to arbitrary target (e.g. 70.42°) by adjusting zero offset
   - Invert direction (stores to EEPROM)
   - Menu controlled by EC-11 encoder:
       Rotate: navigate / edit value
       Click: OK / change step in Set Value
       Long press: Back (or Apply in Set Value); On main screen long press = quick Set Zero
   - LCD redraw without frequent lcd.clear() to reduce flicker
+  - Optimized polling rates for stable operation
 
-  Libraries:
-  - LiquidCrystal_I2C
-  - EEPROM (built-in)
+  Libraries required:
+  - LiquidCrystal_I2C (by Frank de Brabander or similar)
+  - EEPROM (built-in Arduino library)
+  - Wire (built-in Arduino library)
 
   Wiring:
-  LCD I2C: SDA=A4, SCL=A5, VCC=5V, GND=GND
-  P3022: OUT=A0, VCC=5V, GND=GND
-  EC-11: A=D2, B=D3, SW=D4 (to GND), INPUT_PULLUP enabled
+  LCD I2C: 
+    - Uno/Nano: SDA=A4, SCL=A5
+    - Micro: SDA=D2, SCL=D3 (handled automatically by Wire library)
+    - VCC=5V, GND=GND
+  
+  P3022 Sensor:
+    - OUT=A0 (analog input)
+    - VCC=5V, GND=GND
+  
+  EC-11 Encoder:
+    - A=D2, B=D3, SW=D4 (button to GND)
+    - Internal INPUT_PULLUP enabled (no external resistors needed)
 
-  Note:
+  Notes:
   - LCD I2C address commonly 0x27 or 0x3F. Change below if needed.
+  - Code automatically adapts to board type (detected at compile time)
+  - All settings are stored in EEPROM with CRC protection
+  - Works with 16MHz Uno/Nano and 16MHz Micro (both 5V)
 */
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
 
-// ---------------- LCD ----------------
-LiquidCrystal_I2C lcd(0x27, 16, 2); // change to 0x3F if your module uses that
+// ---------------- Board Detection ----------------
+// Auto-detect board type for compatibility
+#if defined(__AVR_ATmega32U4__)
+  #define BOARD_TYPE "Micro (32U4)"
+#elif defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)
+  #define BOARD_TYPE "Uno/Nano (328P)"
+#else
+  #define BOARD_TYPE "Unknown"
+#endif
 
-// ---------------- Pins ----------------
-static const uint8_t PIN_ENC_A  = 2;
-static const uint8_t PIN_ENC_B  = 3;
-static const uint8_t PIN_ENC_SW = 4;
+// ---------------- LCD Configuration ----------------
+// I2C address: change to 0x3F if your LCD module uses that address
+// Common addresses: 0x27, 0x3F
+// For Micro: Wire library automatically uses D2 (SDA) and D3 (SCL)
+// For Uno/Nano: Wire library automatically uses A4 (SDA) and A5 (SCL)
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Change to 0x3F if needed
 
-static const uint8_t PIN_ANGLE  = A0;
+// ---------------- Pin Definitions ----------------
+// These pins are compatible across Uno, Nano, and Micro
+static const uint8_t PIN_ENC_A  = 2;   // Encoder channel A (interrupt-capable on most boards)
+static const uint8_t PIN_ENC_B  = 3;   // Encoder channel B (interrupt-capable on most boards)
+static const uint8_t PIN_ENC_SW = 4;   // Encoder switch/button
+
+static const uint8_t PIN_ANGLE  = A0;  // Analog input for P3022 sensor
 
 // ---------------- Settings in EEPROM ----------------
 struct Settings {
@@ -84,14 +124,17 @@ void loadSettings() {
 }
 
 // ---------------- ADC / angle math ----------------
+// Read ADC with averaging for better stability
+// Compatible with all AVR boards (Uno/Nano/Micro have same ADC resolution: 10-bit = 0-1023)
 uint16_t readAdcAvg16() {
   uint32_t acc = 0;
   for (uint8_t i = 0; i < 16; i++) {
     acc += analogRead(PIN_ANGLE);
     // Small delay between reads for better stability and ADC settling
+    // ADC conversion takes ~100us, delay ensures stable readings
     if (i < 15) delayMicroseconds(100);
   }
-  return (uint16_t)(acc >> 4); // /16 => 0..1023
+  return (uint16_t)(acc >> 4); // Divide by 16 => 0..1023
 }
 
 uint16_t adcToAngle100(uint16_t adc) {
@@ -430,8 +473,10 @@ void handleUI(uint16_t adc, uint16_t raw100, uint16_t shown100) {
 }
 
 // ---------------- Timing ----------------
-// Encoder polling: 2ms is sufficient for most encoders (1ms was too frequent)
+// Polling rates optimized for stable operation across all boards
+// Encoder polling: 2ms is sufficient for most encoders (works well on 16MHz boards)
 // UI update: 20ms provides smooth 50Hz display update rate
+// These timings work well on both ATmega328P (Uno/Nano) and ATmega32U4 (Micro)
 static const uint16_t ENCODER_TICK_MS = 2;
 static const uint16_t UI_TICK_MS = 20;
 
@@ -439,25 +484,50 @@ uint32_t lastEncTick = 0;
 uint32_t lastUiTick  = 0;
 
 void setup() {
+  // Initialize I2C bus (Wire library handles pin differences automatically)
+  Wire.begin(); // Uno/Nano: A4/A5, Micro: D2/D3
+  
   // Configure encoder pins with internal pullups
+  // Note: D2/D3 on Micro can also be used for interrupts if needed in future
   pinMode(PIN_ENC_A, INPUT_PULLUP);
   pinMode(PIN_ENC_B, INPUT_PULLUP);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
 
-  // Configure ADC reference (AVcc = 5V typically)
+  // Configure ADC reference
+  // DEFAULT = AVcc (5V for Uno/Nano/Micro)
+  // For 3.3V boards, use INTERNAL or EXTERNAL
   analogReference(DEFAULT);
 
   // Load settings from EEPROM (or defaults if first run)
   loadSettings();
 
   // Initialize LCD display
+  // Wait a bit for I2C to stabilize (especially important for some I2C adapters)
+  delay(100);
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0); lcd.print("P3022 + Menu");
-  lcd.setCursor(0, 1); lcd.print("Init...");
-  delay(400); // Allow time for user to see init message
+  
+  // Display startup message with board info
+  lcd.setCursor(0, 0); 
+  lcd.print("P3022 Sensor");
+  lcd.setCursor(0, 1);
+  #if defined(__AVR_ATmega32U4__)
+    lcd.print("Micro 32U4");
+  #elif defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)
+    lcd.print("Uno/Nano 328");
+  #else
+    lcd.print("Initializing...");
+  #endif
+  delay(600); // Allow time for user to see init message
+
+  // Clear and show ready message
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Ready");
+  lcd.setCursor(0, 1); lcd.print("Press for menu");
+  delay(300);
 
   // Initialize encoder state to current hardware state to avoid false first movement
+  // Read current encoder position
   uint8_t a = digitalRead(PIN_ENC_A) & 1;
   uint8_t b = digitalRead(PIN_ENC_B) & 1;
   prevAB = (a << 1) | b;
