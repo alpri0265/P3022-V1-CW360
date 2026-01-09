@@ -1,5 +1,3 @@
-// test 123
-
 /*
   ATmega328 + LCD1602 I2C(PCF8574) + EC-11 (A/B + SW, RC-friendly polling) + P3022-V1-CW360 (VCC/OUT/GND analog)
 
@@ -67,13 +65,16 @@ void saveSettings() {
 
 void loadSettings() {
   EEPROM.get(0, S);
+  
+  // Validate loaded settings
   bool bad =
-    (S.crc != simple_crc(S)) ||
-    (S.calMin >= S.calMax) ||
-    (S.calMax > 1023) ||
-    (S.zero100 >= 36000);
+    (S.crc != simple_crc(S)) ||      // CRC mismatch = corrupted data
+    (S.calMin >= S.calMax) ||         // Invalid calibration range
+    (S.calMax > 1023) ||              // ADC max out of range
+    (S.zero100 >= 36000);             // Zero offset out of range
 
   if (bad) {
+    // Load defaults if validation failed (first run or corrupted EEPROM)
     S.zero100 = 0;
     S.calMin  = 0;
     S.calMax  = 1023;
@@ -85,7 +86,11 @@ void loadSettings() {
 // ---------------- ADC / angle math ----------------
 uint16_t readAdcAvg16() {
   uint32_t acc = 0;
-  for (uint8_t i = 0; i < 16; i++) acc += analogRead(PIN_ANGLE);
+  for (uint8_t i = 0; i < 16; i++) {
+    acc += analogRead(PIN_ANGLE);
+    // Small delay between reads for better stability and ADC settling
+    if (i < 15) delayMicroseconds(100);
+  }
   return (uint16_t)(acc >> 4); // /16 => 0..1023
 }
 
@@ -112,18 +117,22 @@ uint16_t adcToAngle100(uint16_t adc) {
 }
 
 uint16_t applyZero100(uint16_t angle100) {
+  // Apply zero offset with proper wrap-around
   int32_t a = (int32_t)angle100 - (int32_t)S.zero100;
-  while (a < 0) a += 36000;
-  while (a >= 36000) a -= 36000;
+  // Normalize to 0..35999 range using modulo arithmetic
+  if (a < 0) a += 36000;
+  else if (a >= 36000) a -= 36000;
   return (uint16_t)a;
 }
 
 // Set displayed value to target by adjusting zero:
-// shown = raw - zero (mod 36000)  => zero = raw - target (mod 36000)
+// shown = (raw - zero) mod 36000  => zero = (raw - target) mod 36000
+// This allows setting the display to show any desired angle by adjusting the zero offset
 void doSetValue(uint16_t raw100, uint16_t target100) {
   int32_t z = (int32_t)raw100 - (int32_t)target100;
-  while (z < 0) z += 36000;
-  while (z >= 36000) z -= 36000;
+  // Normalize to 0..35999 range
+  if (z < 0) z += 36000;
+  else if (z >= 36000) z -= 36000;
   S.zero100 = (uint16_t)z;
   saveSettings();
 }
@@ -134,13 +143,17 @@ void doSetZero(uint16_t raw100) {
 }
 
 void doCalMin(uint16_t adc) {
+  // Set calibration minimum, ensure it's less than max
   S.calMin = adc;
-  if (S.calMin >= S.calMax) S.calMax = S.calMin + 1;
-  if (S.calMax > 1023) S.calMax = 1023;
+  if (S.calMin >= S.calMax) {
+    S.calMax = S.calMin + 1;
+    if (S.calMax > 1023) S.calMax = 1023;
+  }
   saveSettings();
 }
 
 void doCalMax(uint16_t adc) {
+  // Set calibration maximum, ensure it's greater than min
   S.calMax = adc;
   if (S.calMax <= S.calMin) {
     S.calMin = (S.calMax > 0) ? (S.calMax - 1) : 0;
@@ -171,26 +184,32 @@ static uint32_t swDownMs   = 0;
 static bool     longFired  = false;
 
 void encoderTick1ms() {
-  const uint16_t swDebounceMs = 25;
-  const uint8_t abStableTicks = 2;
-  // A/B decode (quadrature)
+  // Debounce constants
+  static const uint16_t SW_DEBOUNCE_MS = 25;      // Button debounce time
+  static const uint8_t AB_STABLE_TICKS = 2;       // Encoder AB lines must be stable for 2 ticks
+  
+  // A/B decode (quadrature encoder with debouncing)
   uint8_t a = digitalRead(PIN_ENC_A);
   uint8_t b = digitalRead(PIN_ENC_B);
   uint8_t ab = (a << 1) | b;
 
+  // Debounce encoder lines: require stable state for multiple ticks
   if (ab == lastAB) {
-    if (abCount < abStableTicks) abCount++;
+    if (abCount < AB_STABLE_TICKS) abCount++;
   } else {
     abCount = 0;
     lastAB = ab;
   }
 
-  if (abCount >= abStableTicks && ab != prevAB) {
+  // Process encoder rotation only when state is stable and changed
+  if (abCount >= AB_STABLE_TICKS && ab != prevAB) {
+    // Lookup table for quadrature decoding (Gray code sequence)
+    // Index: (prevAB << 2) | currentAB (4 bits)
     static const int8_t abTable[16] = {
-      0,  1, -1,  0,
-     -1,  0,  0,  1,
-      1,  0,  0, -1,
-      0, -1,  1,  0
+      0,  1, -1,  0,  // prev=00: 00->00=0, 00->01=+1, 00->10=-1, 00->11=0
+     -1,  0,  0,  1,  // prev=01: 01->00=-1, 01->01=0, 01->10=0, 01->11=+1
+      1,  0,  0, -1,  // prev=10: 10->00=+1, 10->01=0, 10->10=0, 10->11=-1
+      0, -1,  1,  0   // prev=11: 11->00=0, 11->01=-1, 11->10=+1, 11->11=0
     };
     uint8_t idx = (prevAB << 2) | ab;
     int8_t step = abTable[idx];
@@ -198,27 +217,31 @@ void encoderTick1ms() {
     prevAB = ab;
   }
 
-  // Button with long press
-  bool up = digitalRead(PIN_ENC_SW); // true=up, false=pressed
+  // Button handling with debouncing and long press detection
+  bool up = digitalRead(PIN_ENC_SW); // true=not pressed (pullup), false=pressed
   uint32_t now = millis();
 
+  // Track button state changes for debouncing
   if (up != swLastUp) {
     swLastUp = up;
     swLastChangeMs = now;
   }
 
-  if ((uint32_t)(now - swLastChangeMs) >= swDebounceMs && up != swPrevUp) {
+  // Apply debouncing: only accept state change after debounce period
+  if ((uint32_t)(now - swLastChangeMs) >= SW_DEBOUNCE_MS && up != swPrevUp) {
     swPrevUp = up;
-    if (!swPrevUp) { // pressed
+    if (!swPrevUp) { // Button pressed
       swDownMs = now;
       longFired = false;
-    } else { // released
-      if (!longFired) enc.click = true;
+    } else { // Button released (after debounce)
+      if (!longFired) enc.click = true; // Only fire click if long press wasn't triggered
     }
   }
+  
+  // Long press detection: >600ms hold
   if (!swPrevUp && !longFired && (uint32_t)(now - swDownMs) > 600) {
     enc.longClick = true;
-    longFired = true;
+    longFired = true; // Prevent click event when released
   }
 }
 
@@ -253,11 +276,12 @@ void lcdFlush() {
   }
 }
 
-// format: "359.99"
+// Format angle from centidegrees (0..35999) to string "359.99"
+// Example: 35999 -> "359.99", 1234 -> " 12.34"
 void formatAngle100(char* out, uint16_t a100) {
-  uint16_t deg = a100 / 100;
-  uint8_t d1 = (a100 / 10) % 10;
-  uint8_t d2 = a100 % 10;
+  uint16_t deg = a100 / 100;        // Whole degrees (0..359)
+  uint8_t d1 = (a100 / 10) % 10;    // First decimal (tenths)
+  uint8_t d2 = a100 % 10;           // Second decimal (hundredths)
   sprintf(out, "%3u.%1u%1u", deg, d1, d2);
 }
 
@@ -283,6 +307,7 @@ uint8_t menuIdx = 0;
 uint16_t target100 = 0; // 0..35999
 uint16_t step100   = 1; // 1=0.01°, 10=0.1°, 100=1°, 1000=10°
 
+// Clamp value to range [lo, hi]
 static inline int16_t clampi16(int16_t v, int16_t lo, int16_t hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
@@ -323,21 +348,22 @@ void handleUI(uint16_t adc, uint16_t raw100, uint16_t shown100) {
     if (longClick) scr = SCR_MAIN;
   }
   else if (scr == SCR_SETVALUE) {
-    // Rotate => change target
+    // Rotate encoder => change target angle value
     if (d) {
       int32_t t = (int32_t)target100 + (d > 0 ? (int32_t)step100 : -(int32_t)step100);
-      while (t < 0) t += 36000;
-      while (t >= 36000) t -= 36000;
+      // Wrap around to keep in 0..35999 range
+      if (t < 0) t += 36000;
+      else if (t >= 36000) t -= 36000;
       target100 = (uint16_t)t;
     }
-    // Click => change step
+    // Click => cycle through step sizes (0.01°, 0.1°, 1°, 10°)
     if (click) {
       if (step100 == 1) step100 = 10;
       else if (step100 == 10) step100 = 100;
       else if (step100 == 100) step100 = 1000;
       else step100 = 1;
     }
-    // Long => apply and back to menu
+    // Long press => apply zero offset adjustment and return to menu
     if (longClick) {
       doSetValue(raw100, target100);
       scr = SCR_MENU;
@@ -404,28 +430,41 @@ void handleUI(uint16_t adc, uint16_t raw100, uint16_t shown100) {
 }
 
 // ---------------- Timing ----------------
+// Encoder polling: 2ms is sufficient for most encoders (1ms was too frequent)
+// UI update: 20ms provides smooth 50Hz display update rate
+static const uint16_t ENCODER_TICK_MS = 2;
+static const uint16_t UI_TICK_MS = 20;
+
 uint32_t lastEncTick = 0;
 uint32_t lastUiTick  = 0;
 
 void setup() {
+  // Configure encoder pins with internal pullups
   pinMode(PIN_ENC_A, INPUT_PULLUP);
   pinMode(PIN_ENC_B, INPUT_PULLUP);
   pinMode(PIN_ENC_SW, INPUT_PULLUP);
 
-  analogReference(DEFAULT); // AVcc
+  // Configure ADC reference (AVcc = 5V typically)
+  analogReference(DEFAULT);
 
+  // Load settings from EEPROM (or defaults if first run)
   loadSettings();
 
+  // Initialize LCD display
   lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0); lcd.print("P3022 + Menu");
   lcd.setCursor(0, 1); lcd.print("Init...");
-  delay(400);
+  delay(400); // Allow time for user to see init message
 
-  // init prevAB to current state to avoid first jump
-  prevAB = ((digitalRead(PIN_ENC_A) & 1) << 1) | (digitalRead(PIN_ENC_B) & 1);
+  // Initialize encoder state to current hardware state to avoid false first movement
+  uint8_t a = digitalRead(PIN_ENC_A) & 1;
+  uint8_t b = digitalRead(PIN_ENC_B) & 1;
+  prevAB = (a << 1) | b;
   lastAB = prevAB;
   abCount = 0;
+  
+  // Initialize button state
   swPrevUp = digitalRead(PIN_ENC_SW);
   swLastUp = swPrevUp;
   swLastChangeMs = millis();
@@ -434,19 +473,19 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  // 1ms tick for encoder
-  if ((uint32_t)(now - lastEncTick) >= 1) {
+  // Encoder tick (2ms polling for stable operation)
+  if ((uint32_t)(now - lastEncTick) >= ENCODER_TICK_MS) {
     lastEncTick = now;
-    encoderTick1ms();
+    encoderTick1ms(); // Function name kept for compatibility, but called at 2ms rate
   }
 
-  // 20ms tick for ADC + UI + LCD
-  if ((uint32_t)(now - lastUiTick) >= 20) {
+  // UI tick (20ms = 50Hz update rate for smooth display)
+  if ((uint32_t)(now - lastUiTick) >= UI_TICK_MS) {
     lastUiTick = now;
 
-    uint16_t adc    = readAdcAvg16();
-    uint16_t raw100 = adcToAngle100(adc);       // sensor angle (calibrated, invert applied), no zero
-    uint16_t shown  = applyZero100(raw100);     // displayed angle with zero offset
+    uint16_t adc    = readAdcAvg16();           // Read averaged ADC value (0..1023)
+    uint16_t raw100 = adcToAngle100(adc);       // Convert to angle (0..35999, calibrated, invert applied, no zero offset)
+    uint16_t shown  = applyZero100(raw100);     // Apply zero offset to get displayed angle
 
     handleUI(adc, raw100, shown);
   }
