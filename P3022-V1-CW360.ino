@@ -8,7 +8,7 @@
   - Arduino Micro (ATmega32U4) - Full support
   
   Hardware:
-  - LCD1602 I2C (PCF8574 adapter)
+  - LCD Display (1602 or 2004) via I2C or 4-bit parallel
   - EC-11 Rotary Encoder (A/B + SW)
   - P3022-V1-CW360 analog angle sensor
   
@@ -26,15 +26,26 @@
   - Optimized polling rates for stable operation
 
   Libraries required:
-  - LiquidCrystal_I2C (by Frank de Brabander or similar)
+  - For I2C: LiquidCrystal_I2C (by Frank de Brabander or similar)
+  - For 4-bit: LiquidCrystal (built-in Arduino library)
   - EEPROM (built-in Arduino library)
-  - Wire (built-in Arduino library)
+  - Wire (built-in Arduino library, only for I2C mode)
 
-  Wiring:
-  LCD I2C: 
+  LCD Configuration (set below):
+  - LCD_TYPE: 1602 (16x2) or 2004 (20x4)
+  - LCD_INTERFACE: I2C or PARALLEL_4BIT
+  
+  Wiring I2C:
     - Uno/Nano: SDA=A4, SCL=A5
     - Micro: SDA=D2, SCL=D3 (handled automatically by Wire library)
     - VCC=5V, GND=GND
+    - I2C address: 0x27 or 0x3F (set LCD_I2C_ADDR below)
+  
+  Wiring 4-bit Parallel (only if LCD_INTERFACE == PARALLEL_4BIT):
+    - RS=12, Enable=11, D4=7, D5=6, D6=5, D7=8
+    - RW=GND (read/write always low)
+    - VCC=5V, GND=GND, V0=potentiometer (contrast)
+    - Can customize pins by changing PIN_LCD_* below
   
   P3022 Sensor:
     - OUT=A0 (analog input)
@@ -45,15 +56,13 @@
     - Internal INPUT_PULLUP enabled (no external resistors needed)
 
   Notes:
-  - LCD I2C address commonly 0x27 or 0x3F. Change below if needed.
   - Code automatically adapts to board type (detected at compile time)
   - All settings are stored in EEPROM with CRC protection
   - Works with 16MHz Uno/Nano and 16MHz Micro (both 5V)
 */
 
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
+#include <string.h>  // For memcpy
 
 // ---------------- Board Detection ----------------
 // Auto-detect board type for compatibility
@@ -66,11 +75,54 @@
 #endif
 
 // ---------------- LCD Configuration ----------------
-// I2C address: change to 0x3F if your LCD module uses that address
-// Common addresses: 0x27, 0x3F
-// For Micro: Wire library automatically uses D2 (SDA) and D3 (SCL)
-// For Uno/Nano: Wire library automatically uses A4 (SDA) and A5 (SCL)
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Change to 0x3F if needed
+// Choose LCD type: 1602 (16x2) or 2004 (20x4)
+#define LCD_TYPE_1602
+// #define LCD_TYPE_2004
+
+// Choose interface: I2C or PARALLEL_4BIT
+#define LCD_INTERFACE_I2C
+// #define LCD_INTERFACE_PARALLEL_4BIT
+
+#if defined(LCD_TYPE_1602)
+  #define LCD_COLS 16
+  #define LCD_ROWS 2
+#elif defined(LCD_TYPE_2004)
+  #define LCD_COLS 20
+  #define LCD_ROWS 4
+#else
+  #error "Please define LCD_TYPE_1602 or LCD_TYPE_2004"
+#endif
+
+#if defined(LCD_INTERFACE_I2C)
+  #include <Wire.h>
+  #include <LiquidCrystal_I2C.h>
+  
+  // I2C address: change to 0x3F if your LCD module uses that address
+  // Common addresses: 0x27, 0x3F
+  // For Micro: Wire library automatically uses D2 (SDA) and D3 (SCL)
+  // For Uno/Nano: Wire library automatically uses A4 (SDA) and A5 (SCL)
+  #define LCD_I2C_ADDR 0x27  // Change to 0x3F if needed
+  
+  LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+
+#elif defined(LCD_INTERFACE_PARALLEL_4BIT)
+  #include <LiquidCrystal.h>
+  
+  // Pin definitions for 4-bit parallel interface
+  // Change these if your wiring is different
+  // Note: D2, D3, D4 are used by encoder, so we use other pins
+  #define PIN_LCD_RS 12
+  #define PIN_LCD_EN 11
+  #define PIN_LCD_D4 7
+  #define PIN_LCD_D5 6
+  #define PIN_LCD_D6 5
+  #define PIN_LCD_D7 8
+  
+  LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
+
+#else
+  #error "Please define LCD_INTERFACE_I2C or LCD_INTERFACE_PARALLEL_4BIT"
+#endif
 
 // ---------------- Pin Definitions ----------------
 // These pins are compatible across Uno, Nano, and Micro
@@ -289,34 +341,84 @@ void encoderTick1ms() {
 }
 
 // ---------------- LCD minimal redraw ----------------
-char line0[17] = {0}, line1[17] = {0};
+// Buffer for LCD lines (size depends on LCD type)
+#if LCD_COLS == 16
+  char line0[17] = {0}, line1[17] = {0};
+  #if LCD_ROWS >= 4
+    char line2[17] = {0}, line3[17] = {0};
+  #endif
+#elif LCD_COLS == 20
+  char line0[21] = {0}, line1[21] = {0};
+  #if LCD_ROWS >= 4
+    char line2[21] = {0}, line3[21] = {0};
+  #endif
+#endif
 
 void lcdSetLine(uint8_t row, const char* s) {
-  char* dst = (row == 0) ? line0 : line1;
-  for (uint8_t i = 0; i < 16; i++) {
+  if (row >= LCD_ROWS) return; // Safety check
+  
+  char* dst;
+  switch (row) {
+    case 0: dst = line0; break;
+    case 1: dst = line1; break;
+    #if LCD_ROWS >= 4
+    case 2: dst = line2; break;
+    case 3: dst = line3; break;
+    #endif
+    default: return;
+  }
+  
+  // Copy string and pad with spaces
+  for (uint8_t i = 0; i < LCD_COLS; i++) {
     char c = s[i];
     if (c == 0) {
       dst[i] = ' ';
-      for (uint8_t j = i + 1; j < 16; j++) dst[j] = ' ';
+      for (uint8_t j = i + 1; j < LCD_COLS; j++) dst[j] = ' ';
       break;
     }
     dst[i] = c;
   }
-  dst[16] = 0;
+  dst[LCD_COLS] = 0;
 }
 
 void lcdFlush() {
-  static char prev0[17] = {0}, prev1[17] = {0};
+  // Static buffers to track previous state for minimal redraw
+  // Use same size as line buffers
+  #if LCD_COLS == 16
+    static char prev0[17] = {0}, prev1[17] = {0};
+    #if LCD_ROWS >= 4
+      static char prev2[17] = {0}, prev3[17] = {0};
+    #endif
+  #elif LCD_COLS == 20
+    static char prev0[21] = {0}, prev1[21] = {0};
+    #if LCD_ROWS >= 4
+      static char prev2[21] = {0}, prev3[21] = {0};
+    #endif
+  #endif
+  
+  // Update only changed lines (minimal redraw for better performance)
   if (strcmp(prev0, line0) != 0) {
     lcd.setCursor(0, 0);
     lcd.print(line0);
-    strcpy(prev0, line0);
+    memcpy(prev0, line0, LCD_COLS + 1);  // Use memcpy instead of strcpy for safety
   }
   if (strcmp(prev1, line1) != 0) {
     lcd.setCursor(0, 1);
     lcd.print(line1);
-    strcpy(prev1, line1);
+    memcpy(prev1, line1, LCD_COLS + 1);
   }
+  #if LCD_ROWS >= 4
+  if (strcmp(prev2, line2) != 0) {
+    lcd.setCursor(0, 2);
+    lcd.print(line2);
+    memcpy(prev2, line2, LCD_COLS + 1);
+  }
+  if (strcmp(prev3, line3) != 0) {
+    lcd.setCursor(0, 3);
+    lcd.print(line3);
+    memcpy(prev3, line3, LCD_COLS + 1);
+  }
+  #endif
 }
 
 // Format angle from centidegrees (0..35999) to string "359.99"
@@ -425,50 +527,109 @@ void handleUI(uint16_t adc, uint16_t raw100, uint16_t shown100) {
   }
 
   // -------- render --------
-  char buf0[17] = {0}, buf1[17] = {0};
+  // Use dynamic buffer size based on LCD_COLS
+  #if LCD_COLS == 16
+    char buf0[17] = {0}, buf1[17] = {0};
+    #if LCD_ROWS >= 4
+      char buf2[17] = {0}, buf3[17] = {0};
+    #endif
+  #elif LCD_COLS == 20
+    char buf0[21] = {0}, buf1[21] = {0};
+    #if LCD_ROWS >= 4
+      char buf2[21] = {0}, buf3[21] = {0};
+    #endif
+  #endif
 
   if (scr == SCR_MAIN) {
     char a[8]; formatAngle100(a, shown100);
-    snprintf(buf0, 17, "ABS:%s deg", a);
-    snprintf(buf1, 17, "Click:MENU L:0");
+    snprintf(buf0, LCD_COLS + 1, "ABS:%s deg", a);
+    snprintf(buf1, LCD_COLS + 1, "Click:MENU L:0");
+    #if LCD_ROWS >= 4
+      snprintf(buf2, LCD_COLS + 1, "");  // Empty line
+      snprintf(buf3, LCD_COLS + 1, "");  // Empty line
+    #endif
   }
   else if (scr == SCR_MENU) {
-    snprintf(buf0, 17, ">%s", menuItems[menuIdx]);
-    snprintf(buf1, 17, "Click:OK L:Back");
+    snprintf(buf0, LCD_COLS + 1, ">%s", menuItems[menuIdx]);
+    snprintf(buf1, LCD_COLS + 1, "Click:OK L:Back");
+    #if LCD_ROWS >= 4
+      // Show additional menu context on 4-line display
+      if (menuIdx > 0) {
+        snprintf(buf2, LCD_COLS + 1, "  %s", menuItems[menuIdx - 1]);
+      } else {
+        snprintf(buf2, LCD_COLS + 1, "");
+      }
+      if (menuIdx < MENU_N - 1) {
+        snprintf(buf3, LCD_COLS + 1, "  %s", menuItems[menuIdx + 1]);
+      } else {
+        snprintf(buf3, LCD_COLS + 1, "");
+      }
+    #endif
   }
   else if (scr == SCR_VIEW) {
     char a[8]; formatAngle100(a, shown100);
-    snprintf(buf0, 17, "Angle:%s deg", a);
-    snprintf(buf1, 17, "ADC:%4u", adc);
+    snprintf(buf0, LCD_COLS + 1, "Angle:%s deg", a);
+    snprintf(buf1, LCD_COLS + 1, "ADC:%4u", adc);
+    #if LCD_ROWS >= 4
+      char raw[8]; formatAngle100(raw, raw100);
+      snprintf(buf2, LCD_COLS + 1, "Raw: %s", raw);
+      snprintf(buf3, LCD_COLS + 1, "Zero:%5u", S.zero100);
+    #endif
   }
   else if (scr == SCR_ZERO) {
-    snprintf(buf0, 17, "Set ZERO?");
-    snprintf(buf1, 17, "Click:YES L:Back");
+    snprintf(buf0, LCD_COLS + 1, "Set ZERO?");
+    snprintf(buf1, LCD_COLS + 1, "Click:YES L:Back");
+    #if LCD_ROWS >= 4
+      char a[8]; formatAngle100(a, raw100);
+      snprintf(buf2, LCD_COLS + 1, "Current: %s", a);
+      snprintf(buf3, LCD_COLS + 1, "");
+    #endif
   }
   else if (scr == SCR_SETVALUE) {
     char t[8]; formatAngle100(t, target100);
-    snprintf(buf0, 17, "Set:%s deg", t);
+    snprintf(buf0, LCD_COLS + 1, "Set:%s deg", t);
 
-    if (step100 == 1)        snprintf(buf1, 17, "Step:0.01 L:OK");
-    else if (step100 == 10)  snprintf(buf1, 17, "Step:0.1  L:OK");
-    else if (step100 == 100) snprintf(buf1, 17, "Step:1    L:OK");
-    else                     snprintf(buf1, 17, "Step:10   L:OK");
+    if (step100 == 1)        snprintf(buf1, LCD_COLS + 1, "Step:0.01 L:OK");
+    else if (step100 == 10)  snprintf(buf1, LCD_COLS + 1, "Step:0.1  L:OK");
+    else if (step100 == 100) snprintf(buf1, LCD_COLS + 1, "Step:1    L:OK");
+    else                     snprintf(buf1, LCD_COLS + 1, "Step:10   L:OK");
+    #if LCD_ROWS >= 4
+      char a[8]; formatAngle100(a, raw100);
+      snprintf(buf2, LCD_COLS + 1, "Raw: %s", a);
+      snprintf(buf3, LCD_COLS + 1, "Rotate:change");
+    #endif
   }
   else if (scr == SCR_CALMIN) {
-    snprintf(buf0, 17, "Cal MIN=%4u", adc);
-    snprintf(buf1, 17, "Click:SAVE L:Back");
+    snprintf(buf0, LCD_COLS + 1, "Cal MIN=%4u", adc);
+    snprintf(buf1, LCD_COLS + 1, "Click:SAVE L:Back");
+    #if LCD_ROWS >= 4
+      snprintf(buf2, LCD_COLS + 1, "Range: %u-%u", S.calMin, S.calMax);
+      snprintf(buf3, LCD_COLS + 1, "");
+    #endif
   }
   else if (scr == SCR_CALMAX) {
-    snprintf(buf0, 17, "Cal MAX=%4u", adc);
-    snprintf(buf1, 17, "Click:SAVE L:Back");
+    snprintf(buf0, LCD_COLS + 1, "Cal MAX=%4u", adc);
+    snprintf(buf1, LCD_COLS + 1, "Click:SAVE L:Back");
+    #if LCD_ROWS >= 4
+      snprintf(buf2, LCD_COLS + 1, "Range: %u-%u", S.calMin, S.calMax);
+      snprintf(buf3, LCD_COLS + 1, "");
+    #endif
   }
   else if (scr == SCR_INVERT) {
-    snprintf(buf0, 17, "Invert: %s", (S.flags & 1) ? "ON " : "OFF");
-    snprintf(buf1, 17, "Click:TOG L:Back");
+    snprintf(buf0, LCD_COLS + 1, "Invert: %s", (S.flags & 1) ? "ON " : "OFF");
+    snprintf(buf1, LCD_COLS + 1, "Click:TOG L:Back");
+    #if LCD_ROWS >= 4
+      snprintf(buf2, LCD_COLS + 1, "Direction: %s", (S.flags & 1) ? "Reversed" : "Normal");
+      snprintf(buf3, LCD_COLS + 1, "");
+    #endif
   }
 
   lcdSetLine(0, buf0);
   lcdSetLine(1, buf1);
+  #if LCD_ROWS >= 4
+    lcdSetLine(2, buf2);
+    lcdSetLine(3, buf3);
+  #endif
   lcdFlush();
 }
 
@@ -484,8 +645,12 @@ uint32_t lastEncTick = 0;
 uint32_t lastUiTick  = 0;
 
 void setup() {
-  // Initialize I2C bus (Wire library handles pin differences automatically)
-  Wire.begin(); // Uno/Nano: A4/A5, Micro: D2/D3
+  // Initialize I2C bus (only needed for I2C interface)
+  #if defined(LCD_INTERFACE_I2C)
+    Wire.begin(); // Uno/Nano: A4/A5, Micro: D2/D3 (handled automatically)
+    // Wait a bit for I2C to stabilize (especially important for some I2C adapters)
+    delay(100);
+  #endif
   
   // Configure encoder pins with internal pullups
   // Note: D2/D3 on Micro can also be used for interrupts if needed in future
@@ -502,10 +667,12 @@ void setup() {
   loadSettings();
 
   // Initialize LCD display
-  // Wait a bit for I2C to stabilize (especially important for some I2C adapters)
-  delay(100);
-  lcd.init();
-  lcd.backlight();
+  #if defined(LCD_INTERFACE_I2C)
+    lcd.init();  // I2C LCD uses init()
+    lcd.backlight();  // Turn on backlight (I2C only, parallel has separate control)
+  #elif defined(LCD_INTERFACE_PARALLEL_4BIT)
+    lcd.begin(LCD_COLS, LCD_ROWS);  // 4-bit parallel LCD uses begin()
+  #endif
   
   // Display startup message with board info
   lcd.setCursor(0, 0); 
@@ -518,13 +685,36 @@ void setup() {
   #else
     lcd.print("Initializing...");
   #endif
-  delay(600); // Allow time for user to see init message
+  #if LCD_ROWS >= 4
+    lcd.setCursor(0, 2);
+    #if defined(LCD_INTERFACE_I2C)
+      lcd.print("I2C ");
+    #elif defined(LCD_INTERFACE_PARALLEL_4BIT)
+      lcd.print("4-bit ");
+    #endif
+    #if defined(LCD_TYPE_1602)
+      lcd.print("1602");
+    #elif defined(LCD_TYPE_2004)
+      lcd.print("2004");
+    #endif
+    lcd.setCursor(0, 3);
+    lcd.print("Ready...");
+  #endif
+  delay(800); // Allow time for user to see init message
 
   // Clear and show ready message
   lcd.clear();
-  lcd.setCursor(0, 0); lcd.print("Ready");
-  lcd.setCursor(0, 1); lcd.print("Press for menu");
-  delay(300);
+  lcd.setCursor(0, 0); 
+  lcd.print("Ready");
+  lcd.setCursor(0, 1); 
+  lcd.print("Press for menu");
+  #if LCD_ROWS >= 4
+    lcd.setCursor(0, 2); 
+    lcd.print("Long: Set Zero");
+    lcd.setCursor(0, 3); 
+    lcd.print("");
+  #endif
+  delay(400);
 
   // Initialize encoder state to current hardware state to avoid false first movement
   // Read current encoder position
