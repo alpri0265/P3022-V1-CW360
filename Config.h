@@ -19,8 +19,8 @@
 // #define LCD_TYPE_2004
 
 // Choose interface: I2C or PARALLEL_4BIT
-#define LCD_INTERFACE_I2C
-// #define LCD_INTERFACE_PARALLEL_4BIT
+// #define LCD_INTERFACE_I2C
+#define LCD_INTERFACE_PARALLEL_4BIT
 
 #if defined(LCD_TYPE_1602)
   #define LCD_COLS 16

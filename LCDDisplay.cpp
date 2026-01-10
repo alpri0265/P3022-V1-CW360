@@ -25,6 +25,7 @@ void LCDDisplay::begin() {
     lcd.backlight();  // Turn on backlight
   #elif defined(LCD_INTERFACE_PARALLEL_4BIT)
     lcd.begin(LCD_COLS, LCD_ROWS);  // 4-bit parallel LCD uses begin()
+    delay(50); // Wait for LCD to stabilize after initialization
   #endif
   
   // Initialize line buffers
