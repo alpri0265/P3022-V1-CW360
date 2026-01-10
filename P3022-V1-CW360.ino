@@ -11,7 +11,7 @@
   - LCD Display (1602 or 2004) via I2C or 4-bit parallel
   - EC-11 Rotary Encoder (A/B + SW)
   - P3022-V1-CW360 analog angle sensor
-  
+
   Features:
   - Reads P3022 analog output on A0 (ADC averaged for stability)
   - Calibration MIN/MAX (stores to EEPROM with CRC validation)
@@ -66,8 +66,8 @@
 
 // Include LCD library based on interface type (must be before LCDDisplay.h)
 #if defined(LCD_INTERFACE_I2C)
-  #include <Wire.h>
-  #include <LiquidCrystal_I2C.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
   // Global LCD object (will be used by LCDDisplay class)
   LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
 #elif defined(LCD_INTERFACE_PARALLEL_4BIT)
@@ -116,12 +116,26 @@ void menuInvertToggle() {
   doInvertToggle();
 }
 
-// ---------------- Timing Variables ----------------
-// Timing constants are defined in Config.h
-uint32_t lastEncTick = 0;
-uint32_t lastUiTick  = 0;
+       // ---------------- Timing Variables ----------------
+       // Timing constants are defined in Config.h
+       // Note: Encoder rotation is now handled by interrupts, so encoder.update() 
+       // only needs to be called for button processing (can be slower)
+       uint32_t lastEncTick = 0;
+       uint32_t lastUiTick  = 0;
 
 void setup() {
+  #ifdef DEBUG_ENCODER_DELTA
+  Serial.begin(115200);
+  // For Arduino Micro: Serial works immediately, no need to wait
+  // For other boards: small delay to ensure Serial is ready
+  delay(500);
+  Serial.println("=== Encoder Debug Mode ===");
+  Serial.print("ENCODER_STEPS_PER_DETENT = ");
+  Serial.println(ENCODER_STEPS_PER_DETENT);
+  Serial.println("Rotate encoder to see delta values...");
+  Serial.println();
+  #endif
+
   // Configure ADC reference
   // DEFAULT = AVcc (5V for Uno/Nano/Micro)
   // For 3.3V boards, use INTERNAL or EXTERNAL
@@ -143,13 +157,14 @@ void setup() {
 }
 
 void loop() {
-  uint32_t now = millis();
+         uint32_t now = millis();
 
-  // Encoder tick (2ms polling for stable operation)
-  if ((uint32_t)(now - lastEncTick) >= ENCODER_TICK_MS) {
-    lastEncTick = now;
-    encoder.update(); // Update encoder state
-  }
+         // Encoder tick - button processing only (rotation is handled by interrupts)
+         // Can be called less frequently now (10ms is enough for button debouncing)
+         if ((uint32_t)(now - lastEncTick) >= ENCODER_TICK_MS) {
+           lastEncTick = now;
+           encoder.update(); // Process button state (rotation handled by ISR)
+         }
 
   // UI tick (20ms = 50Hz update rate for smooth display)
   if ((uint32_t)(now - lastUiTick) >= UI_TICK_MS) {
@@ -161,8 +176,66 @@ void loop() {
 
     // Update menu with encoder events and sensor data
     if (menuManager) {
-      Encoder::State encState = encoder.getState(true);
-      menuManager->update(adc, raw100, shown, encState);
+      // Get encoder state without resetting (we'll consume delta partially)
+      Encoder::State encState = encoder.getState(false);
+      
+      #ifdef DEBUG_ENCODER_DELTA
+      // Print debug info BEFORE menu update to see original delta and accumulator
+      static uint8_t lastMenuIdxBefore = 255;
+      static int16_t lastAccumBefore = 999;
+      if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_MENU) {
+        uint8_t menuIdxBefore = menuManager->getMenuIndex();
+        int16_t accumBefore = menuManager->getAccumulator();
+        if (encState.delta != 0 || menuIdxBefore != lastMenuIdxBefore || accumBefore != lastAccumBefore) {
+          Serial.print("[BEFORE] Delta: ");
+          Serial.print(encState.delta);
+          Serial.print(" | MenuIdx: ");
+          Serial.print(menuIdxBefore);
+          Serial.print(" | Accum: ");
+          Serial.print(accumBefore);
+          Serial.print(" | STEPS/DETENT=");
+          Serial.println(ENCODER_STEPS_PER_DETENT);
+          lastMenuIdxBefore = menuIdxBefore;
+          lastAccumBefore = accumBefore;
+        }
+      }
+      #endif
+      
+      // Update menu and get number of encoder steps actually processed
+      int16_t processedSteps = menuManager->update(adc, raw100, shown, encState);
+      
+      #ifdef DEBUG_ENCODER_DELTA
+      // Print debug info AFTER menu update to see what changed
+      if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_MENU) {
+        static uint8_t lastMenuIdxAfter = 255;
+        static int16_t lastAccumAfter = 999;
+        uint8_t menuIdxAfter = menuManager->getMenuIndex();
+        int16_t accumAfter = menuManager->getAccumulator();
+        if (processedSteps != 0 || menuIdxAfter != lastMenuIdxAfter || accumAfter != lastAccumAfter) {
+          Serial.print("[AFTER]  Processed: ");
+          Serial.print(processedSteps);
+          Serial.print(" | MenuIdx: ");
+          Serial.print(menuIdxAfter);
+          Serial.print(" | Accum: ");
+          Serial.println(accumAfter);
+          lastMenuIdxAfter = menuIdxAfter;
+          lastAccumAfter = accumAfter;
+        }
+      }
+      #endif
+      
+      // Consume only the steps that were actually processed by MenuManager
+      // For menu: MenuManager processes 1 detent (ENCODER_STEPS_PER_DETENT) if available
+      // For other screens: processes all delta
+      if (processedSteps != 0) {
+        encoder.consumeDelta(processedSteps);
+      }
+      // If processedSteps == 0 (partial detent in menu), delta remains in encoder for next cycle
+      
+      // Reset button flags
+      if (encState.click || encState.longClick) {
+        encoder.resetButtonFlags();
+      }
     }
   }
 }
