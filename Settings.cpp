@@ -44,6 +44,9 @@ void doSetValue(uint16_t raw100, uint16_t target100) {
 }
 
 void doSetZero(uint16_t raw100) {
+  // Set zero offset so that the current raw angle becomes the new zero point
+  // This means: displayed_angle = raw100 - zero100
+  // To make displayed_angle = 0, we set: zero100 = raw100
   S.zero100 = raw100;
   saveSettings();
 }

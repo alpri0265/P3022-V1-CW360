@@ -1,29 +1,31 @@
 /*
   Arduino Uno/Nano/Micro Compatible
-  P3022 Angle Sensor with LCD Display and Rotary Encoder Menu
+  P3022 Angle Sensor with LCD Display and Button Menu Navigation
+  Version: Button_V1.1 (Button-based menu control)
   
   Compatible boards:
   - Arduino Uno (ATmega328P) - Full support
   - Arduino Nano (ATmega328P) - Full support  
   - Arduino Micro (ATmega32U4) - Full support
   
-  Hardware:
-  - LCD Display (1602 or 2004) via I2C or 4-bit parallel
-  - EC-11 Rotary Encoder (A/B + SW)
-  - P3022-V1-CW360 analog angle sensor
-
-  Features:
-  - Reads P3022 analog output on A0 (ADC averaged for stability)
-  - Calibration MIN/MAX (stores to EEPROM with CRC validation)
-  - Zero offset (Set Zero) stores to EEPROM
-  - Set Value: set displayed angle to arbitrary target (e.g. 70.42°) by adjusting zero offset
-  - Invert direction (stores to EEPROM)
-  - Menu controlled by EC-11 encoder:
-      Rotate: navigate / edit value
-      Click: OK / change step in Set Value
-      Long press: Back (or Apply in Set Value); On main screen long press = quick Set Zero
-  - LCD redraw without frequent lcd.clear() to reduce flicker
-  - Optimized polling rates for stable operation
+         Hardware:
+         - LCD Display (1602 or 2004) via I2C or 4-bit parallel
+         - 4 Buttons for menu navigation (UP, DOWN, OK, BACK)
+         - P3022-V1-CW360 analog angle sensor
+         
+         Features:
+         - Reads P3022 analog output on A0 (ADC averaged for stability)
+         - Calibration MIN/MAX (stores to EEPROM with CRC validation)
+         - Zero offset (Set Zero) stores to EEPROM
+         - Set Value: set displayed angle to arbitrary target (e.g. 70.42°) by adjusting zero offset
+         - Invert direction (stores to EEPROM)
+         - Menu controlled by buttons:
+             UP: navigate up / increase value in Set Value
+             DOWN: navigate down / decrease value in Set Value
+             OK: select / confirm / apply
+             BACK: cancel / back to previous screen / quick Set Zero (long press on main screen)
+         - LCD redraw without frequent lcd.clear() to reduce flicker
+         - Optimized polling rates for stable operation
 
   Libraries required:
   - For I2C: LiquidCrystal_I2C (by Frank de Brabander or similar)
@@ -51,9 +53,11 @@
     - OUT=A0 (analog input)
     - VCC=5V, GND=GND
   
-  EC-11 Encoder:
-    - A=D2, B=D3, SW=D4 (button to GND)
+  Buttons for menu navigation:
+    - UP=D2, DOWN=D3, OK=D4, BACK=D9 (all buttons to GND)
+    - Note: D5 is used by LCD (PIN_LCD_D6), so BACK is on D9
     - Internal INPUT_PULLUP enabled (no external resistors needed)
+    - Long press on BACK (on main screen) = quick Set Zero
 
   Notes:
   - Code automatically adapts to board type (detected at compile time)
@@ -79,15 +83,18 @@
 // Include all module headers (order matters for dependencies)
 #include "Settings.h"
 #include "Sensor.h"
-#include "Encoder.h"
+#include "Button.h"
 #include "LCDDisplay.h"  // Requires lcd object defined above
 #include "Utils.h"
 #include "MenuManager.h"  // Requires LCDDisplay and Utils
 #include <string.h>  // For memcpy in LCDDisplay
 
 // ---------------- Global Instances ----------------
-// Global encoder instance
-Encoder encoder(PIN_ENC_A, PIN_ENC_B, PIN_ENC_SW);
+// Global button instances
+Button btnUp(PIN_BTN_UP);
+Button btnDown(PIN_BTN_DOWN);
+Button btnOk(PIN_BTN_OK);
+Button btnBack(PIN_BTN_BACK);
 
 // Global LCD display instance (references global lcd object)
 LCDDisplay lcdDisplay(lcd);
@@ -118,24 +125,10 @@ void menuInvertToggle() {
 
        // ---------------- Timing Variables ----------------
        // Timing constants are defined in Config.h
-       // Note: Encoder rotation is now handled by interrupts, so encoder.update() 
-       // only needs to be called for button processing (can be slower)
-       uint32_t lastEncTick = 0;
+       uint32_t lastButtonTick = 0;
        uint32_t lastUiTick  = 0;
 
 void setup() {
-  #ifdef DEBUG_ENCODER_DELTA
-  Serial.begin(115200);
-  // For Arduino Micro: Serial works immediately, no need to wait
-  // For other boards: small delay to ensure Serial is ready
-  delay(500);
-  Serial.println("=== Encoder Debug Mode ===");
-  Serial.print("ENCODER_STEPS_PER_DETENT = ");
-  Serial.println(ENCODER_STEPS_PER_DETENT);
-  Serial.println("Rotate encoder to see delta values...");
-  Serial.println();
-  #endif
-
   // Configure ADC reference
   // DEFAULT = AVcc (5V for Uno/Nano/Micro)
   // For 3.3V boards, use INTERNAL or EXTERNAL
@@ -144,8 +137,11 @@ void setup() {
   // Load settings from EEPROM (or defaults if first run)
   loadSettings();
 
-  // Initialize encoder (configures pins and reads initial state)
-  encoder.begin();
+  // Initialize buttons (configure pins and read initial state)
+  btnUp.begin();
+  btnDown.begin();
+  btnOk.begin();
+  btnBack.begin();
 
   // Initialize LCD display and show startup message
   lcdDisplay.showStartup();
@@ -157,16 +153,18 @@ void setup() {
 }
 
 void loop() {
-         uint32_t now = millis();
+  uint32_t now = millis();
 
-         // Encoder tick - button processing only (rotation is handled by interrupts)
-         // Can be called less frequently now (10ms is enough for button debouncing)
-         if ((uint32_t)(now - lastEncTick) >= ENCODER_TICK_MS) {
-           lastEncTick = now;
-           encoder.update(); // Process button state (rotation handled by ISR)
-         }
+  // Button processing (debouncing and long press detection)
+  if ((uint32_t)(now - lastButtonTick) >= BUTTON_TICK_MS) {
+    lastButtonTick = now;
+    btnUp.update();
+    btnDown.update();
+    btnOk.update();
+    btnBack.update();
+  }
 
-  // UI tick (20ms = 50Hz update rate for smooth display)
+  // UI tick (10ms = 100Hz update rate for smooth display)
   if ((uint32_t)(now - lastUiTick) >= UI_TICK_MS) {
     lastUiTick = now;
 
@@ -174,68 +172,136 @@ void loop() {
     uint16_t raw100 = adcToAngle100(adc);       // Convert to angle (0..35999, calibrated, invert applied, no zero offset)
     uint16_t shown  = applyZero100(raw100);     // Apply zero offset to get displayed angle
 
-    // Update menu with encoder events and sensor data
+    // Update menu with button events and sensor data
     if (menuManager) {
-      // Get encoder state without resetting (we'll consume delta partially)
-      Encoder::State encState = encoder.getState(false);
+      // IMPORTANT: Check long press BEFORE wasPressed() because wasLongPressed() can only be called once per event
+      bool btnOkLong = btnOk.wasLongPressed();  // Long press OK for step size change in Set Value
+      bool btnBackLong = btnBack.wasLongPressed();  // Long press for quick set zero on main screen
       
-      #ifdef DEBUG_ENCODER_DELTA
-      // Print debug info BEFORE menu update to see original delta and accumulator
-      static uint8_t lastMenuIdxBefore = 255;
-      static int16_t lastAccumBefore = 999;
-      if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_MENU) {
-        uint8_t menuIdxBefore = menuManager->getMenuIndex();
-        int16_t accumBefore = menuManager->getAccumulator();
-        if (encState.delta != 0 || menuIdxBefore != lastMenuIdxBefore || accumBefore != lastAccumBefore) {
-          Serial.print("[BEFORE] Delta: ");
-          Serial.print(encState.delta);
-          Serial.print(" | MenuIdx: ");
-          Serial.print(menuIdxBefore);
-          Serial.print(" | Accum: ");
-          Serial.print(accumBefore);
-          Serial.print(" | STEPS/DETENT=");
-          Serial.println(ENCODER_STEPS_PER_DETENT);
-          lastMenuIdxBefore = menuIdxBefore;
-          lastAccumBefore = accumBefore;
+      // Alternative method for OK long press detection (for step size change in Set Value)
+      // Change step size on RELEASE after long press, not during hold (more intuitive for user)
+      static uint32_t btnOkPressStart = 0;
+      static bool btnOkWasLongHeld = false;  // Flag: button was held >600ms during this press cycle
+      static bool btnOkPendingStepChange = false;  // Flag: step change should happen on release
+      static bool btnOkPreviousPinState = false;  // Track previous pin state to detect release transition
+      static bool btnOkStepChangeFired = false;  // Flag: step change was already fired for this press cycle (prevent double-trigger)
+      
+      bool btnOkPinPressed = !digitalRead(PIN_BTN_OK);
+      bool btnOkJustReleased = (btnOkPreviousPinState && !btnOkPinPressed);  // Detect release transition (true only once per release)
+      
+      if (btnOkPinPressed && btnOkPressStart == 0) {
+        // Button just pressed - start timer and reset all flags
+        btnOkPressStart = now;
+        btnOkWasLongHeld = false;
+        btnOkPendingStepChange = false;
+        btnOkStepChangeFired = false;  // Reset flag for new press cycle
+      } else if (btnOkPinPressed && btnOkPressStart > 0) {
+        // Button still pressed - check if held long enough (>600ms)
+        if (!btnOkWasLongHeld && (uint32_t)(now - btnOkPressStart) >= 600) {
+          btnOkWasLongHeld = true;
+          // Mark that step change should happen on RELEASE (only if in Set Value screen)
+          if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_SETVALUE) {
+            btnOkPendingStepChange = true;
+          }
+        }
+      } else if (!btnOkPinPressed && btnOkPressStart > 0) {
+        // Button released - reset timer for next press cycle
+        btnOkPressStart = 0;
+      }
+      
+      // Update previous pin state for next cycle (for release detection)
+      btnOkPreviousPinState = btnOkPinPressed;
+      
+      // For Set Value screen: use ONLY manual detection (on release) to prevent double-trigger
+      // Button class wasLongPressed() fires during hold, manual timer fires on release
+      // Using both causes double step change (skipping one step size)
+      // Solution: ignore Button class wasLongPressed() for Set Value screen, use only manual timer
+      // IMPORTANT: btnOkStepChangeFired prevents double-trigger - step change fires only once per release
+      bool btnOkLongOnRelease = (btnOkJustReleased && btnOkPendingStepChange && btnOkWasLongHeld && 
+                                 !btnOkStepChangeFired &&
+                                 menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_SETVALUE);
+      
+      // Mark that step change was fired (prevents double-trigger in same or next cycle)
+      if (btnOkLongOnRelease) {
+        btnOkStepChangeFired = true;
+        // Clear flags after firing to prevent re-triggering
+        btnOkPendingStepChange = false;
+        btnOkWasLongHeld = false;
+      }
+      
+      // Combine methods: for Set Value screen use only manual timer, for other screens use Button class
+      bool btnOkLongCombined;
+      if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_SETVALUE) {
+        // Set Value: use ONLY manual timer (on release) to prevent double-trigger and give user control
+        btnOkLongCombined = btnOkLongOnRelease;
+      } else {
+        // Other screens: use Button class wasLongPressed() (normal behavior)
+        btnOkLongCombined = btnOkLong;
+      }
+      
+      // Quick set zero from main screen (long press BACK) - handle IMMEDIATELY
+      // Track button hold time manually using direct pin read (more reliable than Button class)
+      static uint32_t btnBackPressStart = 0;
+      static bool btnBackLongProcessed = false;  // Prevent multiple zero operations per press
+      
+      // Read pin directly to detect physical press state (LOW = pressed with pullup)
+      // This bypasses Button class state machine which might not work correctly
+      bool btnBackPinPressed = !digitalRead(PIN_BTN_BACK);
+      
+      if (btnBackPinPressed && btnBackPressStart == 0) {
+        // Button just pressed - start timer
+        btnBackPressStart = now;
+        btnBackLongProcessed = false;
+      } else if (!btnBackPinPressed) {
+        // Button released - reset timer and flag
+        btnBackPressStart = 0;
+        btnBackLongProcessed = false;
+      }
+      
+      // Check if button has been held for long time (>600ms)
+      bool btnBackLongHeld = (btnBackPressStart > 0 && (uint32_t)(now - btnBackPressStart) >= 600);
+      
+      // Check if we're on main screen and long press was detected (either wasLongPressed() or manual timer)
+      if (menuManager->getCurrentScreen() == MenuManager::SCR_MAIN && 
+          (btnBackLong || (btnBackLongHeld && !btnBackLongProcessed))) {
+        // To make current displayed value (shown) become exactly 0.00°:
+        // shown = raw100 - zero100, so zero100 = raw100 - shown
+        // If we want shown = 0, we need: zero100 = raw100 - 0 = raw100
+        // So we set zero100 to current raw100 value
+        menuSetZero(raw100);  // Set zero offset to current raw angle (makes displayed angle = 0.00°)
+        
+        // Recalculate shown value after setting zero (should be exactly 0)
+        shown = applyZero100(raw100);  // Recalculate: shown = raw100 - zero100 = raw100 - raw100 = 0
+        
+        // Reset display smoothing IMMEDIATELY to show exact 0.00° and prevent drift
+        // This must be done BEFORE update() call to prevent smoothing from "recovering" old value
+        menuManager->resetDisplaySmoothing();
+        
+        // Mark as processed to prevent multiple zero operations during same press
+        if (btnBackLongHeld) {
+          btnBackLongProcessed = true;
         }
       }
-      #endif
       
-      // Update menu and get number of encoder steps actually processed
-      int16_t processedSteps = menuManager->update(adc, raw100, shown, encState);
+      // Get button events (automatically reset after reading)
+      bool btnUpEvent = btnUp.wasPressed();
+      bool btnDownEvent = btnDown.wasPressed();
+      bool btnOkEvent = btnOk.wasPressed();
+      bool btnBackEvent = btnBack.wasPressed();
       
-      #ifdef DEBUG_ENCODER_DELTA
-      // Print debug info AFTER menu update to see what changed
-      if (menuManager && menuManager->getCurrentScreen() == MenuManager::SCR_MENU) {
-        static uint8_t lastMenuIdxAfter = 255;
-        static int16_t lastAccumAfter = 999;
-        uint8_t menuIdxAfter = menuManager->getMenuIndex();
-        int16_t accumAfter = menuManager->getAccumulator();
-        if (processedSteps != 0 || menuIdxAfter != lastMenuIdxAfter || accumAfter != lastAccumAfter) {
-          Serial.print("[AFTER]  Processed: ");
-          Serial.print(processedSteps);
-          Serial.print(" | MenuIdx: ");
-          Serial.print(menuIdxAfter);
-          Serial.print(" | Accum: ");
-          Serial.println(accumAfter);
-          lastMenuIdxAfter = menuIdxAfter;
-          lastAccumAfter = accumAfter;
-        }
+      // If BACK long press was used for zeroing, don't trigger back action
+      if ((btnBackLong || btnBackLongHeld) && menuManager->getCurrentScreen() == MenuManager::SCR_MAIN) {
+        btnBackEvent = false;  // Prevent back action when using long press for zeroing
       }
-      #endif
       
-      // Consume only the steps that were actually processed by MenuManager
-      // For menu: MenuManager processes 1 detent (ENCODER_STEPS_PER_DETENT) if available
-      // For other screens: processes all delta
-      if (processedSteps != 0) {
-        encoder.consumeDelta(processedSteps);
+      // If OK long press is detected (for step size change in Set Value), don't trigger OK action
+      // This prevents accidental apply when user releases button after long press for step change
+      if (btnOkLongCombined && menuManager->getCurrentScreen() == MenuManager::SCR_SETVALUE) {
+        btnOkEvent = false;  // Prevent OK action when using long press for step size change
       }
-      // If processedSteps == 0 (partial detent in menu), delta remains in encoder for next cycle
       
-      // Reset button flags
-      if (encState.click || encState.longClick) {
-        encoder.resetButtonFlags();
-      }
+      // Update menu with button events
+      menuManager->update(adc, raw100, shown, btnUpEvent, btnDownEvent, btnOkEvent, btnBackEvent, btnOkLongCombined);
     }
   }
 }

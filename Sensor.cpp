@@ -4,13 +4,15 @@ extern Settings S;
 
 uint16_t readAdcAvg16() {
   uint32_t acc = 0;
-  for (uint8_t i = 0; i < 16; i++) {
+  // Increased averaging from 16 to 64 samples for maximum stability and reduced noise
+  // This provides better noise reduction at the cost of slightly longer read time (~6.4ms)
+  for (uint8_t i = 0; i < 64; i++) {
     acc += analogRead(PIN_ANGLE);
     // Small delay between reads for better stability and ADC settling
     // ADC conversion takes ~100us, delay ensures stable readings
-    if (i < 15) delayMicroseconds(100);
+    if (i < 63) delayMicroseconds(100);
   }
-  return (uint16_t)(acc >> 4); // Divide by 16 => 0..1023
+  return (uint16_t)(acc >> 6); // Divide by 64 => 0..1023
 }
 
 uint16_t adcToAngle100(uint16_t adc) {
